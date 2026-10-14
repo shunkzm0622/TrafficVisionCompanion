@@ -13,81 +13,148 @@ jobs:
     timeout-minutes: 35
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Generate Xcode project
+      - name: Generate project without cross-platform embedding
         shell: bash
         run: |
           set -euo pipefail
-          xcodegen generate --spec project.yml
-          python3 scripts/fix-watch-embed.py
 
-      - name: Build for physical iPhone with embedded Watch app (unsigned)
+          # Remove the original Watch dependency.
+          # Build the two platforms separately.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("project.yml")
+          s = p.read_text()
+
+          s, n = re.subn(
+              r'(?m)^    dependencies:\n'
+              r'      - target: TrafficVisionWatchCompanion\n'
+              r'        embed: true\n',
+              '',
+              s,
+              count=1
+          )
+
+          if n != 1:
+              raise SystemExit(
+                  "Expected Watch dependency not found in project.yml"
+              )
+
+          p.write_text(s)
+          PY
+
+          xcodegen generate --spec project.yml
+
+      - name: Build Apple Watch for physical device
         shell: bash
         run: |
           set -euo pipefail
-          set -o pipefail
+
+          xcodebuild \
+            -project TrafficVisionCompanion.xcodeproj \
+            -scheme TrafficVisionWatchCompanion \
+            -configuration Release \
+            -sdk watchos \
+            -destination 'generic/platform=watchOS' \
+            -derivedDataPath "$RUNNER_TEMP/TVWatchBuild" \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee "$RUNNER_TEMP/watch-build.log"
+
+      - name: Build iPhone for physical device
+        shell: bash
+        run: |
+          set -euo pipefail
+
           xcodebuild \
             -project TrafficVisionCompanion.xcodeproj \
             -scheme TrafficVisionPhone \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/TVBuild" \
+            -derivedDataPath "$RUNNER_TEMP/TVPhoneBuild" \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY='' \
-            build 2>&1 | tee "$RUNNER_TEMP/unsigned-build.log"
+            build 2>&1 | tee "$RUNNER_TEMP/iphone-build.log"
 
-      - name: Package unsigned device IPA
+      - name: Embed Watch app and create unsigned IPA
         shell: bash
         run: |
           set -euo pipefail
 
-          APP="$RUNNER_TEMP/TVBuild/Build/Products/Release-iphoneos/TrafficVisionPhone.app"
+          PHONE="$RUNNER_TEMP/TVPhoneBuild/Build/Products/Release-iphoneos/TrafficVisionPhone.app"
+          WATCH="$RUNNER_TEMP/TVWatchBuild/Build/Products/Release-watchos/TrafficVisionWatchCompanion.app"
 
-          test -d "$APP" || {
-            echo '::error::iPhone device app not found'
+          test -d "$PHONE" || {
+            echo '::error::iPhone app not found'
+            exit 1
+          }
+
+          test -d "$WATCH" || {
+            echo '::error::Watch app not found'
             exit 1
           }
 
           mkdir -p "$RUNNER_TEMP/TVPayload/Payload"
           mkdir -p "$RUNNER_TEMP/TVOutput"
 
-          ditto "$APP" "$RUNNER_TEMP/TVPayload/Payload/TrafficVisionPhone.app"
+          APP="$RUNNER_TEMP/TVPayload/Payload/TrafficVisionPhone.app"
 
-          echo 'Embedded watchOS apps (if any):'
-          find "$RUNNER_TEMP/TVPayload/Payload/TrafficVisionPhone.app" -type d -name '*.app' -print
+          ditto "$PHONE" "$APP"
+
+          mkdir -p "$APP/Watch"
+
+          ditto "$WATCH" \
+            "$APP/Watch/TrafficVisionWatchCompanion.app"
+
+          # Verify embedded Watch application.
+          test -f \
+            "$APP/Watch/TrafficVisionWatchCompanion.app/Info.plist"
 
           /usr/libexec/PlistBuddy \
-            -c 'Print :CFBundleIdentifier' \
-            "$RUNNER_TEMP/TVPayload/Payload/TrafficVisionPhone.app/Info.plist"
+            -c 'Print :CFBundleExecutable' \
+            "$APP/Watch/TrafficVisionWatchCompanion.app/Info.plist"
+
+          echo "Watch app embedded successfully"
+
+          find "$APP/Watch" \
+            -maxdepth 2 -name '*.app' -type d -print
+
+          echo "Watch companion bundle ID:"
+
+          /usr/libexec/PlistBuddy \
+            -c 'Print :WKCompanionAppBundleIdentifier' \
+            "$APP/Watch/TrafficVisionWatchCompanion.app/Info.plist"
 
           cd "$RUNNER_TEMP/TVPayload"
 
-          /usr/bin/zip -qr \
+          zip -q -r \
             "$RUNNER_TEMP/TVOutput/TrafficVisionCompanion-UNSIGNED.ipa" \
             Payload
 
-          unzip -t \
-            "$RUNNER_TEMP/TVOutput/TrafficVisionCompanion-UNSIGNED.ipa" | tail -1
+          unzip -l \
+            "$RUNNER_TEMP/TVOutput/TrafficVisionCompanion-UNSIGNED.ipa" \
+            | grep 'Payload/TrafficVisionPhone.app/Watch/TrafficVisionWatchCompanion.app/Info.plist'
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
-          name: TrafficVisionCompanion-UNSIGNED-IPA
+          name: TrafficVisionCompanion-UNSIGNED-with-Watch
           path: ${{ runner.temp }}/TVOutput/TrafficVisionCompanion-UNSIGNED.ipa
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload build log on failure
+      - name: Upload diagnostic logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: TrafficVisionCompanion-unsigned-build-logs
-          path: ${{ runner.temp }}/unsigned-build.log
+          name: device-build-logs
+          path: |
+            ${{ runner.temp }}/watch-build.log
+            ${{ runner.temp }}/iphone-build.log
           if-no-files-found: ignore
