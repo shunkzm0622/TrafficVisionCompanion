@@ -1,0 +1,11 @@
+.DS_Store
+build/
+build-watch/
+*.xcodeproj/
+*.xcworkspace/
+*.xcarchive/
+*.ipa
+*.p12
+*.mobileprovision
+*.cer
+*.log

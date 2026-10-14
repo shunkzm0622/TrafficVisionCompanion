@@ -1,0 +1,42 @@
+name: Build TrafficVision Companion
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: |
+          xcodegen generate --spec project.yml
+          python3 scripts/fix-watch-embed.py
+      - name: Build iPhone Simulator with embedded Watch app (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project TrafficVisionCompanion.xcodeproj -scheme TrafficVisionPhone \
+            -configuration Debug -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build-iphone.log
+      - name: Build Watch Simulator separately (unsigned)
+        if: success()
+        run: |
+          set -o pipefail
+          xcodebuild -project TrafficVisionCompanion.xcodeproj -scheme TrafficVisionWatchCompanion \
+            -configuration Debug -destination 'generic/platform=watchOS Simulator' \
+            -derivedDataPath build-watch CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build-watch.log
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: '*.log'
+      - name: Simulator build
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrafficVisionCompanion-unsigned-simulator
+          path: build/Build/Products/Debug-iphonesimulator/TrafficVisionPhone.app
