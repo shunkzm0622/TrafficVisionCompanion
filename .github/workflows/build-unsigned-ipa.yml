@@ -1,0 +1,93 @@
+
+name: Build TrafficVision Companion Unsigned IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unsigned-ipa:
+    runs-on: macos-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodegen generate --spec project.yml
+          python3 scripts/fix-watch-embed.py
+
+      - name: Build for physical iPhone with embedded Watch app (unsigned)
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          xcodebuild \
+            -project TrafficVisionCompanion.xcodeproj \
+            -scheme TrafficVisionPhone \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/TVBuild" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            build 2>&1 | tee "$RUNNER_TEMP/unsigned-build.log"
+
+      - name: Package unsigned device IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$RUNNER_TEMP/TVBuild/Build/Products/Release-iphoneos/TrafficVisionPhone.app"
+
+          test -d "$APP" || {
+            echo '::error::iPhone device app not found'
+            exit 1
+          }
+
+          mkdir -p "$RUNNER_TEMP/TVPayload/Payload"
+          mkdir -p "$RUNNER_TEMP/TVOutput"
+
+          ditto "$APP" "$RUNNER_TEMP/TVPayload/Payload/TrafficVisionPhone.app"
+
+          echo 'Embedded watchOS apps (if any):'
+          find "$RUNNER_TEMP/TVPayload/Payload/TrafficVisionPhone.app" -type d -name '*.app' -print
+
+          /usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleIdentifier' \
+            "$RUNNER_TEMP/TVPayload/Payload/TrafficVisionPhone.app/Info.plist"
+
+          cd "$RUNNER_TEMP/TVPayload"
+
+          /usr/bin/zip -qr \
+            "$RUNNER_TEMP/TVOutput/TrafficVisionCompanion-UNSIGNED.ipa" \
+            Payload
+
+          unzip -t \
+            "$RUNNER_TEMP/TVOutput/TrafficVisionCompanion-UNSIGNED.ipa" | tail -1
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrafficVisionCompanion-UNSIGNED-IPA
+          path: ${{ runner.temp }}/TVOutput/TrafficVisionCompanion-UNSIGNED.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrafficVisionCompanion-unsigned-build-logs
+          path: ${{ runner.temp }}/unsigned-build.log
+          if-no-files-found: ignore
