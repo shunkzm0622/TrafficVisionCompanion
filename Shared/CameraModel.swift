@@ -7,9 +7,7 @@ import WatchConnectivity
     @Published var dataURL: String = UserDefaults.standard.string(forKey: "jsonURL") ?? ""
     @Published var status = "Chưa tải dữ liệu"
     @Published var isLoading = false
-    #if os(watchOS)
-    @Published var receivedImages: [String: Data] = [:]
-    #endif
+   @Published var receivedImages: [String: Data] = [:]
     private var session: WCSession? { WCSession.isSupported() ? WCSession.default : nil }
 
     override init() {
